@@ -108,41 +108,60 @@ def main():
             if not (videodb_api_key and google_api_key):
                 st.error("❌ Please provide both VideoDB and Google API keys in the sidebar")
             elif uploaded_file or video_url:
-                # Create a progress bar and status updates
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                # Create containers for progress updates
+                progress_container = st.container()
+                status_container = st.container()
+                
+                with progress_container:
+                    progress_bar = st.progress(0)
+                with status_container:
+                    status_text = st.empty()
                 
                 try:
-                    status_text.text("🔧 Uploading video to VideoDB...")
-                    progress_bar.progress(20)
-                    
+                    # Pass progress bar and status text to the processor
                     result = st.session_state.video_processor.process_video(
                         uploaded_file=uploaded_file,
                         video_url=video_url,
                         title=video_title,
-                        description=video_description
+                        description=video_description,
+                        progress_bar=progress_bar,
+                        status_text=status_text
                     )
-                    
-                    progress_bar.progress(100)
-                    status_text.text("✅ Video processed successfully!")
                     
                     # Store video reference for queries
                     if 'video_object' in result:
                         st.session_state.video_processor.store_video_reference(result['video_object'])
                     
                     st.session_state.video_analysis = result
-                    st.success("✅ Video analysis complete!")
+                    
+                    # Show success message and results
+                    st.success("🎉 Video analysis completed successfully!")
                     st.balloons()
                     
+                    # Show a preview of results
+                    with st.expander("📊 Analysis Preview", expanded=True):
+                        if result.get('summary'):
+                            st.write("**Summary:**", result['summary'])
+                        if result.get('topics'):
+                            st.write("**Topics:**", ", ".join(result['topics']))
+                        if result.get('key_quotes'):
+                            st.write("**Key Points:**")
+                            for i, quote in enumerate(result['key_quotes'][:3], 1):
+                                st.write(f"{i}. {quote}")
+                    
+                    # Clear progress indicators after a delay
+                    import time
+                    time.sleep(2)
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    st.info("✨ Switch to the 'AI Analysis' tab to explore detailed insights!")
+                    
+                except Exception as e:
                     # Clear progress indicators
                     progress_bar.empty()
                     status_text.empty()
                     
-                    st.rerun()
-                    
-                except Exception as e:
-                    progress_bar.empty()
-                    status_text.empty()
                     st.error(f"❌ Error processing video: {str(e)}")
                     
                     # Provide specific help based on error type
@@ -155,12 +174,18 @@ def main():
                         st.write("- Try using a different video or check VideoDB service status")
                     elif "api" in error_str or "key" in error_str:
                         st.info("💡 **API Issue**: Please check your API keys and ensure they are valid and have sufficient credits")
+                    elif "timeout" in error_str:
+                        st.info("💡 **Timeout Issue**: The video processing took too long. Try with:")
+                        st.write("- A shorter video")
+                        st.write("- Better internet connection")
+                        st.write("- Retry the process")
                     else:
                         st.info("💡 **General troubleshooting**:")
                         st.write("- Ensure video format is supported (MP4, AVI, MOV, etc.)")
                         st.write("- Check your internet connection")
                         st.write("- Verify API keys are correct")
                         st.write("- Try with a smaller video file")
+                        st.write("- Check VideoDB service status")
             else:
                 st.warning("⚠️ Please upload a video file or enter a video URL")
     
@@ -228,7 +253,7 @@ def main():
                 st.subheader("🏷️ Topics")
                 if analysis.get('topics'):
                     for topic in analysis['topics']:
-                        st.tag(topic) if hasattr(st, 'tag') else st.write(f"• {topic}")
+                        st.badge(topic) if hasattr(st, 'badge') else st.write(f"• {topic}")
                 else:
                     st.info("Topics will appear here")
     
