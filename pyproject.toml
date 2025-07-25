@@ -1,0 +1,18 @@
+[project]
+name = "contentwise-ai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=0.3.27",
+    "langchain-google-genai>=2.1.8",
+    "langgraph>=0.5.4",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "pillow>=11.3.0",
+    "python-dotenv>=1.1.1",
+    "requests>=2.32.4",
+    "streamlit>=1.47.0",
+    "videodb>=0.2.16",
+]

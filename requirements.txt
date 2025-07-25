@@ -1,0 +1,10 @@
+streamlit
+videodb
+langchain
+langgraph
+langchain-google-genai
+python-dotenv
+requests
+pillow
+pandas
+numpy
