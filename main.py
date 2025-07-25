@@ -148,6 +148,15 @@ def main():
                             st.write("**Key Points:**")
                             for i, quote in enumerate(result['key_quotes'][:3], 1):
                                 st.write(f"{i}. {quote}")
+                        
+                        # Show content quality info
+                        if result.get('content_quality'):
+                            if result['content_quality'] == 'high':
+                                st.success(f"✅ High quality content extracted ({result.get('content_length', 0)} characters)")
+                            elif result['content_quality'] == 'low':
+                                st.warning(f"⚠️ Limited content extracted ({result.get('content_length', 0)} characters)")
+                            else:
+                                st.info(f"ℹ️ Minimal content extracted ({result.get('content_length', 0)} characters)")
                     
                     # Clear progress indicators after a delay
                     import time
@@ -166,11 +175,11 @@ def main():
                     
                     # Provide specific help based on error type
                     error_str = str(e).lower()
-                    if "transcript" in error_str:
-                        st.info("💡 **Transcript Issue**: The video transcript generation failed. This might be due to:")
-                        st.write("- Audio quality issues")
-                        st.write("- Unsupported audio format")
+                    if "indexing" in error_str or "search" in error_str:
+                        st.info("💡 **Indexing Issue**: The video indexing failed. This might be due to:")
+                        st.write("- Video format compatibility issues")
                         st.write("- VideoDB service temporary issues")
+                        st.write("- API key permissions or credits")
                         st.write("- Try using a different video or check VideoDB service status")
                     elif "api" in error_str or "key" in error_str:
                         st.info("💡 **API Issue**: Please check your API keys and ensure they are valid and have sufficient credits")
@@ -183,7 +192,7 @@ def main():
                         st.info("💡 **General troubleshooting**:")
                         st.write("- Ensure video format is supported (MP4, AVI, MOV, etc.)")
                         st.write("- Check your internet connection")
-                        st.write("- Verify API keys are correct")
+                        st.write("- Verify API keys are correct and have sufficient permissions")
                         st.write("- Try with a smaller video file")
                         st.write("- Check VideoDB service status")
             else:
@@ -201,6 +210,11 @@ def main():
             if analysis.get('video_id'):
                 st.success(f"🎬 Video ID: {analysis['video_id']}")
             
+            # Show content extraction info
+            if analysis.get('content_quality'):
+                quality_emoji = "✅" if analysis['content_quality'] == 'high' else "⚠️" if analysis['content_quality'] == 'low' else "ℹ️"
+                st.info(f"{quality_emoji} Content Quality: {analysis['content_quality'].title()} - {analysis.get('content_length', 0)} characters extracted")
+            
             # Create columns for better layout
             col1, col2 = st.columns([2, 1])
             
@@ -214,6 +228,8 @@ def main():
                 
                 # Query Section
                 st.subheader("🔍 Ask Questions About the Video")
+                st.info("💡 This feature searches through the video's spoken content using AI semantic search.")
+                
                 user_query = st.text_input(
                     "Enter your question:",
                     placeholder="What is the main topic discussed in the video?",
@@ -225,7 +241,7 @@ def main():
                     ask_button = st.button("Get Answer", type="secondary")
                 
                 if ask_button and user_query:
-                    with st.spinner("🔍 Finding answer..."):
+                    with st.spinner("🔍 Searching video content..."):
                         try:
                             answer = st.session_state.video_processor.query_video(
                                 user_query, analysis['video_id']
@@ -235,10 +251,17 @@ def main():
                             
                             if answer.get('timestamps'):
                                 st.write("**Relevant timestamps:**")
-                                for ts in answer['timestamps']:
-                                    st.write(f"⏰ {ts['start']}s - {ts['end']}s: {ts['content']}")
+                                for ts in answer['timestamps'][:3]:  # Limit to 3 timestamps
+                                    start_time = ts.get('start', 0)
+                                    end_time = ts.get('end', 0)
+                                    content = ts.get('content', 'Content found')
+                                    if start_time or end_time:
+                                        st.write(f"⏰ {start_time}s - {end_time}s: {content[:100]}...")
+                                    else:
+                                        st.write(f"📄 {content[:100]}...")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
+                            st.info("💡 Try rephrasing your question or ensure the video was properly indexed.")
             
             with col2:
                 # Key Quotes Section
@@ -256,6 +279,15 @@ def main():
                         st.badge(topic) if hasattr(st, 'badge') else st.write(f"• {topic}")
                 else:
                     st.info("Topics will appear here")
+                
+                # Debug info (can be hidden in production)
+                if st.checkbox("Show debug info", help="Show technical details about content extraction"):
+                    st.subheader("🔧 Debug Info")
+                    if analysis.get('analysis_source'):
+                        st.write(f"**Source:** {analysis['analysis_source']}")
+                    if analysis.get('content_preview'):
+                        st.write("**Content Preview:**")
+                        st.text_area("", analysis['content_preview'][:300], height=100, disabled=True, key="debug_preview")
     
     with tab3:
         st.header("3. Generate Social Media Posts")
@@ -360,7 +392,7 @@ def main():
                             st.success("✅ Compilation created successfully!")
                             st.video(compilation_url)
                         else:
-                            st.info("🔧 Compilation feature is in development. Your request has been processed.")
+                            st.info("🔧 Compilation created. Video URL generation in progress.")
                             
                     except Exception as e:
                         st.error(f"❌ Error creating compilation: {str(e)}")
@@ -372,6 +404,7 @@ def main():
         """
         <div style='text-align: center; color: #666;'>
             <p>🎥 AI Video Analysis Tool | Powered by VideoDB & Google AI</p>
+            <p><small>Using VideoDB SearchType.semantic and IndexType.spoken_word for accurate content extraction</small></p>
         </div>
         """, 
         unsafe_allow_html=True

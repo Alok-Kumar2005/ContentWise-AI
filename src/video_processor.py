@@ -1,4 +1,4 @@
-from videodb import connect
+from videodb import connect, SearchType, IndexType
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
@@ -14,8 +14,8 @@ class VideoProcessor:
         self.llm = None
         self.initialize_clients()
     
-    def _wait_for_transcript(self, video, max_wait_time=300, check_interval=10, progress_callback=None, status_callback=None):
-        """Wait for transcript generation to complete using correct VideoDB methods"""
+    def _wait_for_indexing(self, video, max_wait_time=300, check_interval=10, progress_callback=None, status_callback=None):
+        """Wait for video indexing to complete"""
         import time
         
         start_time = time.time()
@@ -29,97 +29,29 @@ class VideoProcessor:
                 if progress_callback and status_callback:
                     progress = min(40 + (attempts / max_attempts) * 40, 80)  # 40-80% range
                     progress_callback(progress)
-                    status_callback(f"⏳ Generating transcript... (Attempt {attempts}/{max_attempts})")
+                    status_callback(f"⏳ Indexing video content... (Attempt {attempts}/{max_attempts})")
                 
-                # Use the correct VideoDB method to get transcript text
+                # Try to search for any content to check if indexing is complete
+                test_result = video.search(
+                    query="test", 
+                    search_type=SearchType.semantic,
+                    index_type=IndexType.spoken_word
+                )
+                
+                if test_result and hasattr(test_result, 'shots'):
+                    if status_callback:
+                        status_callback(f"✅ Video indexing completed successfully!")
+                    return True
+                
                 if status_callback:
-                    status_callback(f"🔍 Attempting to retrieve transcript text (attempt {attempts})...")
-                
-                # Try the documented method first
-                try:
-                    transcript_text = video.get_transcript_text()
-                    if status_callback:
-                        status_callback(f"✅ Got transcript via get_transcript_text() (length: {len(transcript_text) if transcript_text else 0})")
-                    
-                    if transcript_text and len(transcript_text.strip()) > 10:
-                        if status_callback:
-                            preview = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
-                            status_callback(f"📄 Transcript preview: {preview}")
-                        return transcript_text
-                    else:
-                        if status_callback:
-                            status_callback("⚠️ get_transcript_text() returned empty or very short content")
-                
-                except Exception as text_error:
-                    if status_callback:
-                        status_callback(f"❌ get_transcript_text() failed: {str(text_error)[:100]}")
-                
-                # Fallback to JSON method if text method fails
-                try:
-                    transcript_json = video.get_transcript()
-                    if status_callback:
-                        status_callback(f"🔍 Trying JSON transcript method...")
-                    
-                    if transcript_json:
-                        transcript_text = ""
-                        
-                        # Handle different JSON transcript formats
-                        if isinstance(transcript_json, str):
-                            transcript_text = transcript_json
-                        elif isinstance(transcript_json, dict):
-                            # Try common JSON fields
-                            for field in ['text', 'transcript', 'content', 'speech_text']:
-                                if field in transcript_json and transcript_json[field]:
-                                    transcript_text = transcript_json[field]
-                                    break
-                        elif isinstance(transcript_json, list):
-                            # Handle list of transcript segments
-                            text_parts = []
-                            for item in transcript_json:
-                                if isinstance(item, dict):
-                                    for field in ['text', 'transcript', 'content']:
-                                        if field in item and item[field]:
-                                            text_parts.append(str(item[field]))
-                                            break
-                                elif isinstance(item, str):
-                                    text_parts.append(item)
-                            transcript_text = " ".join(text_parts)
-                        elif hasattr(transcript_json, 'text'):
-                            transcript_text = transcript_json.text
-                        else:
-                            transcript_text = str(transcript_json)
-                        
-                        if transcript_text and len(transcript_text.strip()) > 10:
-                            if status_callback:
-                                status_callback(f"✅ Extracted from JSON transcript (length: {len(transcript_text)})")
-                                preview = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
-                                status_callback(f"📄 JSON transcript preview: {preview}")
-                            return transcript_text
-                        else:
-                            if status_callback:
-                                status_callback("⚠️ JSON transcript extraction resulted in empty content")
-                
-                except Exception as json_error:
-                    if status_callback:
-                        status_callback(f"❌ get_transcript() JSON method failed: {str(json_error)[:100]}")
-                
-                # If both methods fail, wait and retry
-                if attempts < max_attempts:
-                    if status_callback:
-                        status_callback(f"⏳ Both methods failed, waiting {check_interval} seconds before retry...")
-                    time.sleep(check_interval)
-                    continue
-                else:
-                    break
+                    status_callback(f"⏳ Still indexing, waiting {check_interval} seconds...")
+                time.sleep(check_interval)
                 
             except Exception as e:
                 error_msg = str(e).lower()
-                if status_callback:
-                    status_callback(f"❌ Transcript attempt {attempts} failed: {str(e)[:100]}")
-                
-                if "does not exist" in error_msg or "not found" in error_msg or "processing" in error_msg:
+                if "indexing" in error_msg or "processing" in error_msg or "not ready" in error_msg:
                     if status_callback:
-                        status_callback(f"⏳ Transcript still processing, waiting {check_interval} seconds...")
+                        status_callback(f"⏳ Video still processing, waiting {check_interval} seconds...")
                     time.sleep(check_interval)
                     continue
                 else:
@@ -131,7 +63,7 @@ class VideoProcessor:
                     else:
                         raise e
         
-        raise Exception(f"Transcript generation timed out after {max_wait_time} seconds. Both get_transcript_text() and get_transcript() methods failed.")
+        raise Exception(f"Video indexing timed out after {max_wait_time} seconds.")
     
     def initialize_clients(self):
         """Initialize VideoDB and LangChain clients"""
@@ -152,7 +84,7 @@ class VideoProcessor:
     
     def process_video(self, uploaded_file=None, video_url=None, title="", description="", 
                      progress_bar=None, status_text=None) -> Dict[str, Any]:
-        """Process video and extract analysis with enhanced debugging"""
+        """Process video and extract analysis using correct VideoDB methods"""
         if not self.conn or not self.llm:
             raise Exception("Clients not properly initialized. Check API keys.")
         
@@ -177,7 +109,7 @@ class VideoProcessor:
                     video_path = tmp_file.name
                 
                 update_status(f"📤 Uploading file: {uploaded_file.name}")
-                video = self.conn.upload(path=video_path)
+                video = self.conn.upload(file_path=video_path)  # Correct parameter name
                 os.unlink(video_path)
                 
             elif video_url:
@@ -187,105 +119,37 @@ class VideoProcessor:
                 raise ValueError("Either uploaded_file or video_url must be provided")
             
             update_status(f"✅ Video uploaded successfully! ID: {video.id}")
-            update_progress(20)
-            
-            # Generate stream for the video
-            update_status("🎬 Processing video stream...")
-            video.generate_stream()
             update_progress(30)
             
-            # Enhanced transcript generation with correct VideoDB methods
-            update_status("📝 Starting transcript generation...")
-            transcript_text = ""
+            # Index the video for spoken words (this automatically handles transcription)
+            update_status("🎤 Indexing video for spoken content...")
+            video.index_spoken_words()
+            update_progress(50)
             
-            try:
-                # Check video properties first
-                update_status("🔍 Checking video properties...")
-                video_info = {
-                    'id': getattr(video, 'id', 'Unknown'),
-                    'name': getattr(video, 'name', 'Unknown'),  
-                    'duration': getattr(video, 'duration', 'Unknown'),
-                    'status': getattr(video, 'status', 'Unknown')
-                }
-                update_status(f"📊 Video info: {video_info}")
-                
-                # Generate transcript using VideoDB
-                update_status("🎤 Initiating transcript generation...")
-                video.generate_transcript()
-                update_progress(40)
-                
-                # Wait for transcript using the correct methods
-                transcript_text = self._wait_for_transcript(
-                    video, 
-                    max_wait_time=300,  # 5 minutes
-                    progress_callback=update_progress,
-                    status_callback=update_status
-                )
-                
-                if transcript_text and len(transcript_text.strip()) > 50:
-                    update_status(f"✅ Transcript retrieved successfully! Length: {len(transcript_text)} chars")
-                    # Show a clean preview
-                    clean_preview = transcript_text.strip()[:200] + "..." if len(transcript_text.strip()) > 200 else transcript_text.strip()
-                    update_status(f"📄 Content preview: {clean_preview}")
-                    update_progress(80)
-                else:
-                    update_status(f"⚠️ Transcript seems incomplete or empty")
-                    # Try immediate methods as final attempt
-                    try:
-                        update_status("🔄 Trying immediate transcript retrieval...")
-                        transcript_text = video.get_transcript_text()
-                        if not transcript_text:
-                            # Try JSON method
-                            text_json = video.get_transcript()
-                            if isinstance(text_json, str):
-                                transcript_text = text_json
-                            elif hasattr(text_json, 'text'):
-                                transcript_text = text_json.text
-                            else:
-                                transcript_text = str(text_json) if text_json else ""
-                        
-                        if transcript_text and len(transcript_text.strip()) > 10:
-                            update_status(f"✅ Retrieved transcript via immediate method! Length: {len(transcript_text)}")
-                        else:
-                            update_status("❌ All transcript methods returned empty content")
-                            
-                    except Exception as immediate_error:
-                        update_status(f"❌ Immediate transcript methods failed: {str(immediate_error)}")
-                    
-            except Exception as e:
-                update_status(f"❌ Transcript generation failed: {str(e)}")
-                
-                # Enhanced fallback strategies
-                try:
-                    update_status("🔄 Trying alternative: Scene indexing...")
-                    scenes = video.index_scenes(
-                        prompt="Extract and transcribe all spoken dialogue, narration, and text shown in this scene. Include all spoken content."
-                    )
-                    update_status(f"📋 Scene indexing initiated: {scenes}")
-                    transcript_text = "Video processed with scene indexing. Content analysis available through search functionality."
-                    
-                except Exception as scene_error:
-                    update_status(f"❌ Scene indexing failed: {str(scene_error)}")
-                    
-                    try:
-                        update_status("🔄 Trying spoken word indexing...")
-                        spoken_index = video.index_spoken_words()
-                        update_status(f"🗣️ Spoken word indexing initiated: {spoken_index}")
-                        transcript_text = "Video processed with spoken word indexing. Speech content is searchable."
-                        
-                    except Exception as spoken_error:
-                        update_status(f"❌ All indexing methods failed: {str(spoken_error)}")
-                        transcript_text = f"Video uploaded successfully but transcript extraction failed. Error: {str(e)[:100]}. The video is available for basic analysis."
+            # Wait for indexing to complete
+            update_status("⏳ Waiting for video indexing to complete...")
+            self._wait_for_indexing(
+                video,
+                max_wait_time=300,  # 5 minutes
+                progress_callback=update_progress,
+                status_callback=update_status
+            )
+            
+            update_progress(70)
+            
+            # Extract content by searching for general topics
+            update_status("📄 Extracting video content...")
+            content_text = self._extract_video_content(video, update_status)
+            
+            update_progress(85)
             
             # Generate analysis
             update_status("🤖 Analyzing content with AI...")
-            update_progress(85)
-            
-            analysis = self._analyze_content(transcript_text, title, description, update_status)
+            analysis = self._analyze_content(content_text, title, description, update_status)
             analysis['video_id'] = video.id
             analysis['video_object'] = video
-            analysis['transcript_length'] = len(transcript_text)
-            analysis['raw_transcript_preview'] = transcript_text[:500] if transcript_text else "No transcript"
+            analysis['content_length'] = len(content_text)
+            analysis['content_preview'] = content_text[:500] if content_text else "No content extracted"
             
             update_status("✅ Analysis complete!")
             update_progress(100)
@@ -296,14 +160,72 @@ class VideoProcessor:
             update_status(f"❌ Critical error: {str(e)}")
             raise Exception(f"Error processing video: {str(e)}")
     
-    def _analyze_content(self, transcript: str, title: str, description: str, status_callback=None) -> Dict[str, Any]:
+    def _extract_video_content(self, video, status_callback=None):
+        """Extract video content using search functionality"""
+        try:
+            if status_callback:
+                status_callback("🔍 Extracting spoken content...")
+            
+            # Search for broad topics to get comprehensive content
+            search_queries = [
+                "main topic discussion",
+                "important points",
+                "key information",
+                "summary content",
+                "speaking conversation"
+            ]
+            
+            all_content = []
+            
+            for query in search_queries:
+                try:
+                    if status_callback:
+                        status_callback(f"🔍 Searching for: {query}")
+                    
+                    result = video.search(
+                        query=query,
+                        search_type=SearchType.semantic,
+                        index_type=IndexType.spoken_word
+                    )
+                    
+                    if result and hasattr(result, 'shots'):
+                        for shot in result.shots[:10]:  # Limit to first 10 results per query
+                            if hasattr(shot, 'text') and shot.text:
+                                all_content.append(shot.text)
+                            elif hasattr(shot, 'transcript') and shot.transcript:
+                                all_content.append(shot.transcript)
+                    
+                except Exception as search_error:
+                    if status_callback:
+                        status_callback(f"⚠️ Search failed for '{query}': {str(search_error)[:50]}")
+                    continue
+            
+            # Combine and deduplicate content
+            combined_content = " ".join(all_content)
+            
+            # Remove duplicates by splitting into sentences and deduplicating
+            sentences = combined_content.split('.')
+            unique_sentences = list(dict.fromkeys(sentences))  # Preserve order while removing duplicates
+            final_content = '. '.join(unique_sentences)
+            
+            if status_callback:
+                status_callback(f"✅ Extracted {len(final_content)} characters of content")
+            
+            return final_content if final_content.strip() else "Content extraction completed but no text content found."
+            
+        except Exception as e:
+            if status_callback:
+                status_callback(f"❌ Content extraction failed: {str(e)}")
+            return f"Content extraction failed: {str(e)}"
+    
+    def _analyze_content(self, content: str, title: str, description: str, status_callback=None) -> Dict[str, Any]:
         """Analyze video content with enhanced debugging"""
         
         if status_callback:
-            status_callback(f"🧠 Analyzing content. Transcript length: {len(transcript)} chars")
+            status_callback(f"🧠 Analyzing content. Content length: {len(content)} chars")
         
         # Check content quality
-        content_quality = "high" if len(transcript) > 500 else "low" if len(transcript) > 50 else "minimal"
+        content_quality = "high" if len(content) > 500 else "low" if len(content) > 50 else "minimal"
         
         if status_callback:
             status_callback(f"📊 Content quality: {content_quality}")
@@ -315,7 +237,7 @@ class VideoProcessor:
             
             Title: {title}
             Description: {description}
-            Transcript: {transcript}
+            Content: {content}
             
             Provide a detailed analysis with:
             1. A comprehensive summary (3-4 sentences)
@@ -332,18 +254,18 @@ class VideoProcessor:
             Limited content available for analysis.
             Title: {title}
             Description: {description}
-            Available content: {transcript}
+            Available content: {content}
             
             Based on the available information, provide:
             SUMMARY: A summary noting the limited content available
             TOPICS: General topics that can be inferred
-            QUOTES: Note that specific quotes are not available due to transcript issues
+            QUOTES: Note that specific quotes are not available due to content extraction issues
             
             Be honest about the limitations.
             """
         
         summary_prompt = PromptTemplate(
-            input_variables=["transcript", "title", "description"],
+            input_variables=["content", "title", "description"],
             template=template
         )
         
@@ -353,7 +275,7 @@ class VideoProcessor:
             status_callback("🤖 Running AI analysis...")
         
         result = summary_chain.run(
-            transcript=transcript[:4000] if transcript else "No transcript available",
+            content=content[:4000] if content else "No content available",
             title=title or "Untitled Video",
             description=description or "No description provided"
         )
@@ -363,7 +285,7 @@ class VideoProcessor:
         
         analysis = self._parse_analysis_result(result)
         analysis['content_quality'] = content_quality
-        analysis['analysis_source'] = f"Based on {len(transcript)} characters of content"
+        analysis['analysis_source'] = f"Based on {len(content)} characters of content"
         
         return analysis
     
@@ -398,7 +320,7 @@ class VideoProcessor:
         return analysis
     
     def query_video(self, query: str, video_id: str) -> Dict[str, Any]:
-        """Query specific information from the video"""
+        """Query specific information from the video using correct VideoDB search"""
         try:
             if hasattr(self, '_current_video') and self._current_video.id == video_id:
                 video = self._current_video
@@ -406,31 +328,46 @@ class VideoProcessor:
                 raise Exception("Video object not found. Please re-upload the video.")
             
             try:
-                search_results = video.search(query)
+                # Use correct search parameters
+                search_results = video.search(
+                    query=query,
+                    search_type=SearchType.semantic,
+                    index_type=IndexType.spoken_word
+                )
                 
+                # Extract relevant content from search results
+                relevant_content = []
+                timestamps = []
+                
+                if hasattr(search_results, 'shots'):
+                    for shot in search_results.shots[:5]:  # Limit to top 5 results
+                        if hasattr(shot, 'text') and shot.text:
+                            relevant_content.append(shot.text)
+                        
+                        timestamps.append({
+                            'start': getattr(shot, 'start', 0),
+                            'end': getattr(shot, 'end', 0),
+                            'content': getattr(shot, 'text', 'Content found')
+                        })
+                
+                # Generate response using LLM
                 response_prompt = PromptTemplate(
-                    input_variables=["query", "search_results"],
+                    input_variables=["query", "search_content"],
                     template="""
                     Answer the user's question based on the video search results.
                     
                     Question: {query}
-                    Search Results: {search_results}
+                    Relevant Content: {search_content}
                     
-                    Provide a clear answer with relevant timestamps if available.
+                    Provide a clear and comprehensive answer based on the content found.
                     """
                 )
                 
                 response_chain = LLMChain(llm=self.llm, prompt=response_prompt)
-                response = response_chain.run(query=query, search_results=str(search_results))
-                
-                timestamps = []
-                if hasattr(search_results, 'shots'):
-                    for shot in search_results.shots[:5]:
-                        timestamps.append({
-                            'start': shot.start,
-                            'end': shot.end,
-                            'content': getattr(shot, 'text', 'Content found')
-                        })
+                response = response_chain.run(
+                    query=query, 
+                    search_content=" ".join(relevant_content) if relevant_content else "No relevant content found"
+                )
                 
                 return {
                     'response': response,
@@ -438,8 +375,8 @@ class VideoProcessor:
                     'search_results': search_results
                 }
                 
-            except AttributeError:
-                response = f"I cannot search the video content directly. The video may not have been properly indexed. You asked: '{query}'. Please try re-uploading the video or contact support if the issue persists."
+            except Exception as search_error:
+                response = f"I cannot search the video content. Error: {str(search_error)}. The video may need to be re-indexed or the search functionality is not available."
                 
                 return {
                     'response': response,
@@ -455,32 +392,40 @@ class VideoProcessor:
             }
     
     def create_compilation(self, video_id: str, criteria: str, max_duration: int = 180) -> str:
-        """Create video compilation based on criteria"""
+        """Create video compilation based on criteria using correct VideoDB methods"""
         try:
             if hasattr(self, '_current_video') and self._current_video.id == video_id:
                 video = self._current_video
             else:
                 raise Exception("Video object not found. Please re-upload the video.")
             
-            search_results = video.search(criteria)
+            # Search for relevant content
+            search_results = video.search(
+                query=criteria,
+                search_type=SearchType.semantic,
+                index_type=IndexType.spoken_word
+            )
             
+            # Create timeline for compilation
             from videodb import Timeline
             timeline = Timeline(conn=self.conn)
             
             total_duration = 0
             if hasattr(search_results, 'shots'):
                 for shot in search_results.shots:
-                    if total_duration + (shot.end - shot.start) <= max_duration:
+                    shot_duration = getattr(shot, 'end', 0) - getattr(shot, 'start', 0)
+                    if total_duration + shot_duration <= max_duration:
                         timeline.add_inline(shot)
-                        total_duration += (shot.end - shot.start)
+                        total_duration += shot_duration
                     else:
                         break
             
+            # Generate the compilation
             compilation = timeline.generate()
             return getattr(compilation, 'stream_url', 'Compilation created successfully')
             
         except Exception as e:
-            raise Exception(f"Compilation feature not fully implemented: {str(e)}")
+            raise Exception(f"Error creating compilation: {str(e)}")
     
     def store_video_reference(self, video):
         """Store video reference for later queries"""
