@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Video AI Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <h1>1. Provide Your Content</h1>
+  <form id="upload-form" enctype="multipart/form-data">
+    <input type="file" name="file" accept="video/*" />
+    <input type="text" name="url" placeholder="Or enter video URL" />
+    <input type="text" name="query" placeholder="Timestamp query (optional)" />
+    <button type="submit">Analyze Video</button>
+  </form>
+
+  <div id="results">
+    <!-- Populate summary, posts, snippets via JS -->
+  </div>
+
+  <script>
+    const form = document.getElementById('upload-form');
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const data = new FormData(form);
+      const res = await fetch('/api/analyze', { method: 'POST', body: data });
+      const json = await res.json();
+      // Render json.summary, json.posts, json.snippets...
+    });
+  </script>
+</body>
+</html>

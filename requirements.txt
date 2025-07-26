@@ -5,6 +5,3 @@ langgraph
 langchain-google-genai
 python-dotenv
 requests
-pillow
-pandas
-numpy
