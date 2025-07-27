@@ -1,7 +1,9 @@
 streamlit
 videodb
 langchain
-langgraph
 langchain-google-genai
+langchain-community
 python-dotenv
 requests
+chromadb
+numpy

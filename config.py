@@ -7,6 +7,15 @@ class Config:
     VIDEODB_API_KEY = os.getenv("VIDEODB_API_KEY")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     
+    # RAG Configuration
+    RAG_CONFIG = {
+        "chunk_size": 1000,
+        "chunk_overlap": 200,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "top_k_results": 5,
+        "similarity_threshold": 0.7
+    }
+    
     # Social Media Templates
     SOCIAL_MEDIA_TEMPLATES = {
         "linkedin": {

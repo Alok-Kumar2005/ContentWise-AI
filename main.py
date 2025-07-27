@@ -2,10 +2,12 @@ import streamlit as st
 import os
 from datetime import datetime
 import logging
+import atexit
 
 from services.videodb_service import VideoDBService
 from services.llm_service import LLMService
 from services.social_media_generator import SocialMediaGenerator
+from services.rag_service import RAGService
 from models.video_processor import VideoAnalysis, TimestampQuery
 from utils.helpers import save_uploaded_file, validate_video_url, format_timestamp
 
@@ -15,25 +17,54 @@ logging.basicConfig(level=logging.INFO)
 # Initialize services
 @st.cache_resource
 def init_services():
-    return {
-        'videodb': VideoDBService(),
-        'llm': LLMService(),
-        'social_media': SocialMediaGenerator()
-    }
+    services = {}
+    try:
+        services['videodb'] = VideoDBService()
+        services['llm'] = LLMService()
+        services['social_media'] = SocialMediaGenerator()
+        # Don't cache RAG service as it needs to be session-specific
+        logging.info("Core services initialized successfully")
+    except Exception as e:
+        logging.error(f"Error initializing services: {e}")
+        raise
+    return services
+
+def init_rag_service():
+    """Initialize RAG service for the session"""
+    try:
+        return RAGService()
+    except Exception as e:
+        logging.error(f"Error initializing RAG service: {e}")
+        return None
+
+# Cleanup function for when the app closes
+def cleanup_rag():
+    if 'rag_service' in st.session_state:
+        st.session_state.rag_service.cleanup()
+
+# Register cleanup function
+atexit.register(cleanup_rag)
 
 def main():
     st.set_page_config(
-        page_title="AI-Powered Video Analysis",
+        page_title="AI-Powered Video Analysis with RAG",
         page_icon="🎥",
         layout="wide"
     )
     
-    st.title("🎥 AI-Powered Video Analysis")
-    st.markdown("Upload your video or provide a URL to get AI-powered analysis, summaries, and social media posts!")
+    st.title("🎥 AI-Powered Video Analysis with RAG")
+    st.markdown("Upload your video or provide a URL to get AI-powered analysis, summaries, social media posts, and intelligent Q&A!")
     
     # Initialize services
     try:
         services = init_services()
+        # Initialize RAG service for this session if not already done
+        if 'rag_service' not in st.session_state:
+            rag_service = init_rag_service()
+            if rag_service:
+                st.session_state.rag_service = rag_service
+            else:
+                st.error("Failed to initialize RAG service. Q&A functionality will not be available.")
     except Exception as e:
         st.error(f"Error initializing services: {e}")
         st.stop()
@@ -42,9 +73,46 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         st.info("Make sure to set your API keys in environment variables:\n- VIDEODB_API_KEY\n- GOOGLE_API_KEY")
+        
+        # RAG Database Status
+        if 'rag_service' in st.session_state and st.session_state.rag_service:
+            stats = st.session_state.rag_service.get_database_stats()
+            st.subheader("📊 RAG Database Status")
+            st.write(f"**Status:** {stats['status']}")
+            st.write(f"**Text Chunks:** {stats['chunks']}")
+            
+            if st.button("🗑️ Clear RAG Database"):
+                try:
+                    st.session_state.rag_service.cleanup()
+                    new_rag_service = init_rag_service()
+                    if new_rag_service:
+                        st.session_state.rag_service = new_rag_service
+                        st.success("RAG database cleared!")
+                    else:
+                        st.error("Failed to reinitialize RAG service")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error clearing RAG database: {e}")
+        else:
+            st.subheader("📊 RAG Database Status")
+            st.write("**Status:** Not initialized")
+            if st.button("🔄 Initialize RAG Service"):
+                rag_service = init_rag_service()
+                if rag_service:
+                    st.session_state.rag_service = rag_service
+                    st.success("RAG service initialized!")
+                    st.rerun()
+                else:
+                    st.error("Failed to initialize RAG service")
     
     # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📤 Upload & Analyze", "📝 Summary & Topics", "📱 Social Media Posts", "🔍 Timestamp Search"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📤 Upload & Analyze", 
+        "📝 Summary & Topics", 
+        "📱 Social Media Posts", 
+        "🔍 Timestamp Search",
+        "🤖 AI Q&A (RAG)"
+    ])
     
     with tab1:
         st.header("1. Provide Your Content")
@@ -108,10 +176,14 @@ def main():
             video = st.session_state.video
             
             if st.button("📊 Generate Summary"):
-                with st.spinner("Generating AI analysis..."):
+                with st.spinner("Generating AI analysis and creating RAG database..."):
                     try:
                         # Get transcript
                         transcript = services['videodb'].get_transcript(video)
+                        
+                        if not transcript:
+                            st.error("Could not extract transcript from video")
+                            return
                         
                         # Generate summary
                         summary = services['llm'].generate_summary(
@@ -121,6 +193,16 @@ def main():
                         
                         # Extract key topics
                         topics = services['llm'].extract_key_topics(transcript)
+                        
+                        # Create RAG vector database
+                        if 'rag_service' in st.session_state and st.session_state.rag_service:
+                            rag_success = st.session_state.rag_service.create_vector_database(
+                                transcript, 
+                                st.session_state.get('video_title', '')
+                            )
+                        else:
+                            rag_success = False
+                            st.warning("RAG service not available. Q&A functionality will be limited.")
                         
                         # Store in session state
                         st.session_state.transcript = transcript
@@ -134,6 +216,12 @@ def main():
                         st.subheader("🔑 Key Topics")
                         for i, topic in enumerate(topics, 1):
                             st.write(f"{i}. {topic}")
+                        
+                        # RAG Database Status
+                        if rag_success:
+                            st.success("✅ RAG database created successfully! You can now ask questions about the video content.")
+                        else:
+                            st.warning("⚠️ RAG database creation failed. Q&A feature may not work properly.")
                         
                         st.subheader("📜 Full Transcript")
                         with st.expander("View full transcript"):
@@ -235,6 +323,69 @@ def main():
                         st.error(f"Error searching video: {e}")
         else:
             st.info("Please upload and analyze a video first.")
+    
+    with tab5:
+        st.header("5. AI Q&A with RAG")
+        st.markdown("Ask questions about the video content using Retrieval-Augmented Generation (RAG)")
+        
+        if 'rag_service' in st.session_state and st.session_state.rag_service:
+            stats = st.session_state.rag_service.get_database_stats()
+            
+            if stats['chunks'] > 0:
+                st.success(f"✅ RAG database ready with {stats['chunks']} text chunks")
+                
+                # Chat interface for Q&A
+                if 'rag_messages' not in st.session_state:
+                    st.session_state.rag_messages = []
+                
+                # Display chat history
+                for message in st.session_state.rag_messages:
+                    with st.chat_message(message["role"]):
+                        st.markdown(message["content"])
+                
+                # Chat input
+                if prompt := st.chat_input("Ask a question about the video content..."):
+                    # Add user message to chat history
+                    st.session_state.rag_messages.append({"role": "user", "content": prompt})
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
+                    
+                    # Generate RAG response
+                    with st.chat_message("assistant"):
+                        with st.spinner("Thinking..."):
+                            try:
+                                response = st.session_state.rag_service.query_video_content(prompt)
+                                st.markdown(response)
+                                # Add assistant response to chat history
+                                st.session_state.rag_messages.append({"role": "assistant", "content": response})
+                            except Exception as e:
+                                error_msg = f"Error generating response: {str(e)}"
+                                st.error(error_msg)
+                                st.session_state.rag_messages.append({"role": "assistant", "content": error_msg})
+                
+                # Clear chat button
+                if st.button("🗑️ Clear Chat History"):
+                    st.session_state.rag_messages = []
+                    st.rerun()
+                
+            else:
+                st.info("Please upload and analyze a video first to enable Q&A functionality.")
+                st.markdown("**Steps:**")
+                st.markdown("1. Go to 'Upload & Analyze' tab")
+                st.markdown("2. Upload a video or provide a URL")
+                st.markdown("3. Click 'Analyze Video'")
+                st.markdown("4. Go to 'Summary & Topics' and click 'Generate Summary'")
+                st.markdown("5. Return here to ask questions!")
+        else:
+            st.error("RAG service not initialized properly")
+            if st.button("🔄 Try to Initialize RAG Service"):
+                rag_service = init_rag_service()
+                if rag_service:
+                    st.session_state.rag_service = rag_service
+                    st.success("RAG service initialized!")
+                    st.rerun()
+                else:
+                    st.error("Failed to initialize RAG service")
 
 if __name__ == "__main__":
     main()
