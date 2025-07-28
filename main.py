@@ -3,6 +3,9 @@ import os
 from datetime import datetime
 import logging
 import atexit
+import asyncio
+import threading
+import time
 
 from services.videodb_service import VideoDBService
 from services.llm_service import LLMService
@@ -22,7 +25,6 @@ def init_services():
         services['videodb'] = VideoDBService()
         services['llm'] = LLMService()
         services['social_media'] = SocialMediaGenerator()
-        # Don't cache RAG service as it needs to be session-specific
         logging.info("Core services initialized successfully")
     except Exception as e:
         logging.error(f"Error initializing services: {e}")
@@ -30,20 +32,55 @@ def init_services():
     return services
 
 def init_rag_service():
-    """Initialize RAG service for the session"""
+    """Initialize RAG service for the session with proper error handling"""
     try:
-        return RAGService()
+        # Ensure we have an event loop in the current thread
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Create RAG service with timeout
+        rag_service = RAGService()
+        
+        # Verify the service was initialized properly
+        if hasattr(rag_service, 'client') and rag_service.client is not None:
+            logging.info("RAG service initialized successfully")
+            return rag_service
+        else:
+            logging.error("RAG service initialization failed - client not created")
+            return None
+            
     except Exception as e:
         logging.error(f"Error initializing RAG service: {e}")
         return None
 
 # Cleanup function for when the app closes
 def cleanup_rag():
-    if 'rag_service' in st.session_state:
-        st.session_state.rag_service.cleanup()
+    """Clean up RAG service when app closes"""
+    try:
+        if 'rag_service' in st.session_state and st.session_state.rag_service:
+            st.session_state.rag_service.cleanup_safely()
+            logging.info("RAG service cleaned up on exit")
+    except Exception as e:
+        logging.error(f"Error during RAG cleanup: {e}")
 
 # Register cleanup function
 atexit.register(cleanup_rag)
+
+def safe_rag_operation(operation_func, *args, **kwargs):
+    """Safely execute RAG operations with error handling"""
+    try:
+        if 'rag_service' not in st.session_state or not st.session_state.rag_service:
+            return None, "RAG service not initialized"
+        
+        result = operation_func(*args, **kwargs)
+        return result, None
+    except Exception as e:
+        error_msg = f"RAG operation failed: {str(e)}"
+        logging.error(error_msg)
+        return None, error_msg
 
 def main():
     st.set_page_config(
@@ -58,13 +95,17 @@ def main():
     # Initialize services
     try:
         services = init_services()
+        
         # Initialize RAG service for this session if not already done
         if 'rag_service' not in st.session_state:
-            rag_service = init_rag_service()
-            if rag_service:
-                st.session_state.rag_service = rag_service
-            else:
-                st.error("Failed to initialize RAG service. Q&A functionality will not be available.")
+            with st.spinner("Initializing RAG service..."):
+                rag_service = init_rag_service()
+                if rag_service:
+                    st.session_state.rag_service = rag_service
+                    st.success("✅ RAG service initialized successfully!")
+                else:
+                    st.warning("⚠️ RAG service initialization failed. Q&A functionality will be limited.")
+                    st.session_state.rag_service = None
     except Exception as e:
         st.error(f"Error initializing services: {e}")
         st.stop()
@@ -76,34 +117,46 @@ def main():
         
         # RAG Database Status
         if 'rag_service' in st.session_state and st.session_state.rag_service:
-            stats = st.session_state.rag_service.get_database_stats()
-            st.subheader("📊 RAG Database Status")
-            st.write(f"**Status:** {stats['status']}")
-            st.write(f"**Text Chunks:** {stats['chunks']}")
-            
-            if st.button("🗑️ Clear RAG Database"):
-                try:
-                    st.session_state.rag_service.cleanup()
-                    new_rag_service = init_rag_service()
-                    if new_rag_service:
-                        st.session_state.rag_service = new_rag_service
-                        st.success("RAG database cleared!")
-                    else:
-                        st.error("Failed to reinitialize RAG service")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error clearing RAG database: {e}")
+            try:
+                stats = st.session_state.rag_service.get_database_stats()
+                st.subheader("📊 RAG Database Status")
+                st.write(f"**Status:** {stats['status']}")
+                st.write(f"**Text Chunks:** {stats['chunks']}")
+                st.write(f"**Session ID:** {stats.get('session_id', 'Unknown')[:8]}...")
+                
+                if st.button("🗑️ Clear RAG Database"):
+                    try:
+                        with st.spinner("Clearing RAG database..."):
+                            st.session_state.rag_service.cleanup_safely()
+                            time.sleep(1)  # Give time for cleanup
+                            
+                            new_rag_service = init_rag_service()
+                            if new_rag_service:
+                                st.session_state.rag_service = new_rag_service
+                                st.success("✅ RAG database cleared and reinitialized!")
+                            else:
+                                st.error("❌ Failed to reinitialize RAG service")
+                                st.session_state.rag_service = None
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error clearing RAG database: {e}")
+                        
+            except Exception as e:
+                st.error(f"Error getting RAG status: {e}")
+                st.subheader("📊 RAG Database Status")
+                st.write("**Status:** Error")
         else:
             st.subheader("📊 RAG Database Status")
             st.write("**Status:** Not initialized")
             if st.button("🔄 Initialize RAG Service"):
-                rag_service = init_rag_service()
-                if rag_service:
-                    st.session_state.rag_service = rag_service
-                    st.success("RAG service initialized!")
-                    st.rerun()
-                else:
-                    st.error("Failed to initialize RAG service")
+                with st.spinner("Initializing RAG service..."):
+                    rag_service = init_rag_service()
+                    if rag_service:
+                        st.session_state.rag_service = rag_service
+                        st.success("✅ RAG service initialized!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to initialize RAG service")
     
     # Main content tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -195,13 +248,22 @@ def main():
                         topics = services['llm'].extract_key_topics(transcript)
                         
                         # Create RAG vector database
+                        rag_success = False
                         if 'rag_service' in st.session_state and st.session_state.rag_service:
-                            rag_success = st.session_state.rag_service.create_vector_database(
-                                transcript, 
-                                st.session_state.get('video_title', '')
-                            )
+                            try:
+                                with st.spinner("Creating RAG database..."):
+                                    result, error = safe_rag_operation(
+                                        st.session_state.rag_service.create_vector_database,
+                                        transcript, 
+                                        st.session_state.get('video_title', '')
+                                    )
+                                    rag_success = result if result is not None else False
+                                    if error:
+                                        st.warning(f"RAG database creation issue: {error}")
+                            except Exception as e:
+                                st.warning(f"RAG database creation failed: {e}")
+                                rag_success = False
                         else:
-                            rag_success = False
                             st.warning("RAG service not available. Q&A functionality will be limited.")
                         
                         # Store in session state
@@ -225,7 +287,7 @@ def main():
                         
                         st.subheader("📜 Full Transcript")
                         with st.expander("View full transcript"):
-                            st.text_area("Transcript", transcript, height=300)
+                            st.text_area("Transcript", transcript, height=300, disabled=True)
                         
                     except Exception as e:
                         st.error(f"Error generating analysis: {e}")
@@ -329,63 +391,150 @@ def main():
         st.markdown("Ask questions about the video content using Retrieval-Augmented Generation (RAG)")
         
         if 'rag_service' in st.session_state and st.session_state.rag_service:
-            stats = st.session_state.rag_service.get_database_stats()
-            
-            if stats['chunks'] > 0:
-                st.success(f"✅ RAG database ready with {stats['chunks']} text chunks")
+            try:
+                stats = st.session_state.rag_service.get_database_stats()
                 
-                # Chat interface for Q&A
-                if 'rag_messages' not in st.session_state:
-                    st.session_state.rag_messages = []
-                
-                # Display chat history
-                for message in st.session_state.rag_messages:
-                    with st.chat_message(message["role"]):
-                        st.markdown(message["content"])
-                
-                # Chat input
-                if prompt := st.chat_input("Ask a question about the video content..."):
-                    # Add user message to chat history
-                    st.session_state.rag_messages.append({"role": "user", "content": prompt})
-                    with st.chat_message("user"):
-                        st.markdown(prompt)
+                if stats['chunks'] > 0:
+                    st.success(f"✅ RAG database ready with {stats['chunks']} text chunks")
                     
-                    # Generate RAG response
-                    with st.chat_message("assistant"):
-                        with st.spinner("Thinking..."):
+                    # Advanced options
+                    with st.expander("🔧 Advanced Options"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            show_sources = st.checkbox("Show sources in responses", value=False)
+                            temperature = st.slider("Response creativity", 0.0, 1.0, 0.7, 0.1)
+                        with col2:
+                            num_chunks = st.slider("Number of chunks to retrieve", 1, 10, 5)
+                            
+                        if st.button("🔄 Update RAG Parameters"):
+                            result, error = safe_rag_operation(
+                                st.session_state.rag_service.update_chain_parameters,
+                                temperature=temperature,
+                                k=num_chunks
+                            )
+                            if error:
+                                st.error(f"Error updating parameters: {error}")
+                            else:
+                                st.success("✅ RAG parameters updated!")
+                    
+                    # Chat interface for Q&A
+                    if 'rag_messages' not in st.session_state:
+                        st.session_state.rag_messages = []
+                    
+                    # Display chat history
+                    for message in st.session_state.rag_messages:
+                        with st.chat_message(message["role"]):
+                            st.markdown(message["content"])
+                    
+                    # Chat input
+                    if prompt := st.chat_input("Ask a question about the video content..."):
+                        # Add user message to chat history
+                        st.session_state.rag_messages.append({"role": "user", "content": prompt})
+                        with st.chat_message("user"):
+                            st.markdown(prompt)
+                        
+                        # Generate RAG response
+                        with st.chat_message("assistant"):
+                            with st.spinner("Thinking..."):
+                                try:
+                                    # Get show_sources value from advanced options
+                                    show_sources_val = False
+                                    try:
+                                        # Check if advanced options are expanded and get the value
+                                        show_sources_val = show_sources if 'show_sources' in locals() else False
+                                    except:
+                                        show_sources_val = False
+                                    
+                                    result, error = safe_rag_operation(
+                                        st.session_state.rag_service.query_video_content,
+                                        prompt,
+                                        return_sources=show_sources_val
+                                    )
+                                    
+                                    if error:
+                                        response = f"❌ Error generating response: {error}"
+                                        st.error(response)
+                                    else:
+                                        response = result if result else "No response generated."
+                                        st.markdown(response)
+                                    
+                                    # Add assistant response to chat history
+                                    st.session_state.rag_messages.append({"role": "assistant", "content": response})
+                                    
+                                except Exception as e:
+                                    error_msg = f"❌ Unexpected error: {str(e)}"
+                                    st.error(error_msg)
+                                    st.session_state.rag_messages.append({"role": "assistant", "content": error_msg})
+                    
+                    # Chat management buttons
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if st.button("🗑️ Clear Chat History"):
+                            st.session_state.rag_messages = []
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("📊 Get Similar Chunks"):
+                            if st.session_state.rag_messages:
+                                last_user_message = None
+                                for msg in reversed(st.session_state.rag_messages):
+                                    if msg["role"] == "user":
+                                        last_user_message = msg["content"]
+                                        break
+                                
+                                if last_user_message:
+                                    result, error = safe_rag_operation(
+                                        st.session_state.rag_service.get_similar_chunks,
+                                        last_user_message,
+                                        k=3
+                                    )
+                                    if error:
+                                        st.error(f"Error getting similar chunks: {error}")
+                                    else:
+                                        st.subheader("📄 Similar Text Chunks")
+                                        st.text_area("Similar chunks", result, height=300, disabled=True)
+                                else:
+                                    st.info("No user messages found to search for similar chunks.")
+                            else:
+                                st.info("Ask a question first to find similar chunks.")
+                    
+                    with col3:
+                        if st.button("📈 Database Stats"):
                             try:
-                                response = st.session_state.rag_service.query_video_content(prompt)
-                                st.markdown(response)
-                                # Add assistant response to chat history
-                                st.session_state.rag_messages.append({"role": "assistant", "content": response})
+                                stats = st.session_state.rag_service.get_database_stats()
+                                st.json(stats)
                             except Exception as e:
-                                error_msg = f"Error generating response: {str(e)}"
-                                st.error(error_msg)
-                                st.session_state.rag_messages.append({"role": "assistant", "content": error_msg})
-                
-                # Clear chat button
-                if st.button("🗑️ Clear Chat History"):
-                    st.session_state.rag_messages = []
-                    st.rerun()
-                
-            else:
-                st.info("Please upload and analyze a video first to enable Q&A functionality.")
-                st.markdown("**Steps:**")
-                st.markdown("1. Go to 'Upload & Analyze' tab")
-                st.markdown("2. Upload a video or provide a URL")
-                st.markdown("3. Click 'Analyze Video'")
-                st.markdown("4. Go to 'Summary & Topics' and click 'Generate Summary'")
-                st.markdown("5. Return here to ask questions!")
-        else:
-            st.error("RAG service not initialized properly")
-            if st.button("🔄 Try to Initialize RAG Service"):
-                rag_service = init_rag_service()
-                if rag_service:
-                    st.session_state.rag_service = rag_service
-                    st.success("RAG service initialized!")
-                    st.rerun()
+                                st.error(f"Error getting stats: {e}")
+                    
                 else:
-                    st.error("Failed to initialize RAG service")
+                    st.info("Please upload and analyze a video first to enable Q&A functionality.")
+                    st.markdown("**Steps:**")
+                    st.markdown("1. Go to 'Upload & Analyze' tab")
+                    st.markdown("2. Upload a video or provide a URL")
+                    st.markdown("3. Click 'Analyze Video'")
+                    st.markdown("4. Go to 'Summary & Topics' and click 'Generate Summary'")
+                    st.markdown("5. Return here to ask questions!")
+                    
+            except Exception as e:
+                st.error(f"Error with RAG interface: {e}")
+                st.info("Try reinitializing the RAG service from the sidebar.")
+                
+        else:
+            st.error("❌ RAG service not initialized properly")
+            st.markdown("The RAG service failed to initialize. This could be due to:")
+            st.markdown("- Missing API keys (check environment variables)")
+            st.markdown("- Network connectivity issues")
+            st.markdown("- Dependency conflicts")
+            
+            if st.button("🔄 Try to Initialize RAG Service"):
+                with st.spinner("Attempting to initialize RAG service..."):
+                    rag_service = init_rag_service()
+                    if rag_service:
+                        st.session_state.rag_service = rag_service
+                        st.success("✅ RAG service initialized!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Failed to initialize RAG service. Check logs for details.")
 
 if __name__ == "__main__":
     main()

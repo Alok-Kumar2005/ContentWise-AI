@@ -3,6 +3,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from config import Config
+from core.templates import Template
 import logging
 
 class LLMService:
@@ -17,20 +18,7 @@ class LLMService:
         """Generate video summary from transcript"""
         prompt = PromptTemplate(
             input_variables=["transcript", "title"],
-            template="""
-            Create a comprehensive summary of this video content.
-            
-            Title: {title}
-            Transcript: {transcript}
-            
-            Provide:
-            1. Main topic and purpose
-            2. Key points discussed (3-5 bullet points)
-            3. Important insights or takeaways
-            4. Target audience
-            
-            Keep the summary engaging and informative.
-            """
+            template= Template.summary_template
         )
         
         try:
@@ -45,14 +33,7 @@ class LLMService:
         """Extract key topics from transcript"""
         prompt = PromptTemplate(
             input_variables=["transcript"],
-            template="""
-            Analyze this video transcript and extract the main topics discussed.
-            
-            Transcript: {transcript}
-            
-            Return only the top 5-7 key topics as a comma-separated list.
-            Focus on the most important and relevant topics.
-            """
+            template= Template.key_topic_template
         )
         
         try:

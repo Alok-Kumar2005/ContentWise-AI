@@ -4,6 +4,8 @@ import logging
 import tempfile
 import shutil
 import os
+import asyncio
+import threading
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -12,7 +14,10 @@ from langchain.chains import RetrievalQA
 from langchain.vectorstores import Chroma
 from langchain.schema import Document
 from config import Config
+from core.templates import Template
 import uuid
+import sqlite3
+import time
 
 class RAGService:
     def __init__(self):
@@ -24,14 +29,23 @@ class RAGService:
         self.vectorstore = None
         self.retrieval_qa_chain = None
         self.session_id = str(uuid.uuid4())
+        self.collection = None
         
         try:
-            self.temp_dir = tempfile.mkdtemp()
+            try:
+                asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            self.temp_dir = tempfile.mkdtemp(prefix=f"rag_chroma_{self.session_id[:8]}_")
             self.client = chromadb.PersistentClient(
                 path=self.temp_dir,
                 settings=Settings(
                     allow_reset=True,
-                    anonymized_telemetry=False
+                    anonymized_telemetry=False,
+                    is_persistent=True,
+                    persist_directory=self.temp_dir
                 )
             )
             self.embedding_model = GoogleGenerativeAIEmbeddings(
@@ -54,20 +68,16 @@ class RAGService:
             
         except Exception as e:
             logging.error(f"Error initializing RAG Service: {e}")
-            self.cleanup() 
+            self.cleanup_safely()
     
     def create_vector_database(self, transcript, video_title=""):
         """Create vector database from video transcript and setup RetrievalQA chain"""
         try:
-            collection_name = f"video_transcript_{self.session_id}"
-            
-            # Split transcript into chunks
+            collection_name = f"video_transcript_{self.session_id.replace('-', '_')}"
             chunks = self.text_splitter.split_text(transcript)
             if not chunks:
                 logging.warning("No chunks created from transcript")
                 return False
-            
-            # Create Document objects for LangChain
             documents = [
                 Document(
                     page_content=chunk,
@@ -79,37 +89,30 @@ class RAGService:
                 )
                 for i, chunk in enumerate(chunks)
             ]
+            try:
+                self.vectorstore = Chroma.from_documents(
+                    documents=documents,
+                    embedding=self.embedding_model,
+                    collection_name=collection_name,
+                    persist_directory=self.temp_dir,
+                    client=self.client
+                )
+                self.vectorstore.persist()
+                
+            except Exception as e:
+                logging.error(f"Error creating Chroma vectorstore: {e}")
+                self.vectorstore = Chroma.from_documents(
+                    documents=documents,
+                    embedding=self.embedding_model,
+                    collection_name=collection_name,
+                    persist_directory=self.temp_dir
+                )
             
-            # Create Chroma vectorstore
-            self.vectorstore = Chroma.from_documents(
-                documents=documents,
-                embedding=self.embedding_model,
-                collection_name=collection_name,
-                persist_directory=self.temp_dir
-            )
-            
-            # Create custom prompt template for video content
             custom_prompt = PromptTemplate(
                 input_variables=["context", "question"],
-                template="""You are an AI assistant helping users understand video content. Based on the provided context from the video transcript, answer the user's question accurately and comprehensively.
-
-Context from video transcript:
-{context}
-
-User Question: {question}
-
-Instructions:
-1. Answer based primarily on the provided context
-2. Be specific and detailed in your response
-3. If the context doesn't contain enough information, mention that clearly
-4. Quote relevant parts from the transcript when appropriate
-5. Keep your response focused and relevant to the question
-6. If the question cannot be answered from the context, say so explicitly
-
-Answer:"""
+                template= Template.rag_template
             )
             
-            # Create RetrievalQA chain
             self.retrieval_qa_chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
                 chain_type="stuff",
@@ -133,13 +136,9 @@ Answer:"""
         try:
             if not hasattr(self, 'retrieval_qa_chain') or not self.retrieval_qa_chain:
                 return "No video content available for querying. Please analyze a video first."
-            
-            # Query using RetrievalQA chain
             result = self.retrieval_qa_chain({"query": query})
             
             response = result["result"]
-            
-            # Optionally include source information
             if return_sources and "source_documents" in result:
                 sources_info = self._format_source_documents(result["source_documents"])
                 response += f"\n\n**Sources:**\n{sources_info}"
@@ -155,14 +154,10 @@ Answer:"""
         try:
             if not hasattr(self, 'vectorstore') or not self.vectorstore:
                 return "No video content available for querying. Please analyze a video first."
-            
-            # Create a new retriever with custom parameters
             custom_retriever = self.vectorstore.as_retriever(
                 search_type=search_type,
                 search_kwargs={"k": k}
             )
-            
-            # Create a new RetrievalQA chain with custom retriever
             custom_qa_chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
                 chain_type="stuff",
@@ -199,8 +194,6 @@ Answer:"""
         try:
             if not hasattr(self, 'vectorstore') or not self.vectorstore:
                 return "No video content available for similarity search."
-            
-            # Direct similarity search
             similar_docs = self.vectorstore.similarity_search(query, k=k)
             
             if not similar_docs:
@@ -222,10 +215,14 @@ Answer:"""
         try:
             if not hasattr(self, 'vectorstore') or not self.vectorstore:
                 return {"status": "No database created", "chunks": 0}
-            
-            # Get collection count
-            collection = self.vectorstore._collection
-            count = collection.count() if collection else 0
+            try:
+                if hasattr(self.vectorstore, '_collection') and self.vectorstore._collection:
+                    count = self.vectorstore._collection.count()
+                else:
+                    count = len(self.vectorstore.similarity_search("test", k=1000))
+            except Exception as e:
+                logging.warning(f"Could not get exact count: {e}")
+                count = "Unknown"
             
             return {
                 "status": "Active",
@@ -242,22 +239,14 @@ Answer:"""
         try:
             if not hasattr(self, 'vectorstore') or not self.vectorstore:
                 return False
-            
-            # Update LLM temperature if provided
             if temperature is not None:
                 self.llm.temperature = temperature
-            
-            # Update retriever k if provided
             retriever_kwargs = {"search_type": "similarity"}
             if k is not None:
                 retriever_kwargs["search_kwargs"] = {"k": k}
             else:
                 retriever_kwargs["search_kwargs"] = {"k": 5}
-            
-            # Update chain type if provided
             chain_type = chain_type or "stuff"
-            
-            # Recreate the RetrievalQA chain with updated parameters
             self.retrieval_qa_chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
                 chain_type=chain_type,
@@ -272,41 +261,94 @@ Answer:"""
             logging.error(f"Error updating chain parameters: {e}")
             return False
     
-    def cleanup(self):
-        """Clean up the vector database and temporary files"""
+    def cleanup_safely(self):
+        """Safely clean up the vector database and temporary files"""
         try:
-            # Clean up vectorstore
             if hasattr(self, 'vectorstore') and self.vectorstore:
                 try:
-                    # Delete the collection if it exists
-                    if hasattr(self.vectorstore, '_collection'):
+                    if hasattr(self.vectorstore, '_collection') and self.vectorstore._collection:
                         collection_name = getattr(self.vectorstore._collection, 'name', None)
                         if collection_name and hasattr(self, 'client') and self.client:
-                            self.client.delete_collection(collection_name)
-                            logging.info(f"Deleted collection: {collection_name}")
+                            try:
+                                self.client.delete_collection(collection_name)
+                                logging.info(f"Deleted collection: {collection_name}")
+                            except Exception as e:
+                                logging.warning(f"Could not delete collection: {e}")
+                    self.vectorstore = None
+                    
                 except Exception as e:
-                    logging.warning(f"Could not delete vectorstore collection: {e}")
+                    logging.warning(f"Error cleaning vectorstore: {e}")
             
-            # Clean up temporary directory
-            if hasattr(self, 'temp_dir') and self.temp_dir and os.path.exists(self.temp_dir):
+            if hasattr(self, 'client') and self.client:
                 try:
-                    shutil.rmtree(self.temp_dir)
-                    logging.info(f"Cleaned up temporary directory: {self.temp_dir}")
+                    if hasattr(self.client, 'reset'):
+                        self.client.reset()
                 except Exception as e:
-                    logging.warning(f"Could not clean up temp directory: {e}")
-            
-            # Reset attributes
+                    logging.warning(f"Could not reset client: {e}")
+                finally:
+                    self.client = None
+            self._force_close_sqlite_connections()
+            if hasattr(self, 'temp_dir') and self.temp_dir and os.path.exists(self.temp_dir):
+                self._cleanup_temp_dir_with_retry()
             self.vectorstore = None
             self.retrieval_qa_chain = None
             self.client = None
-            self.temp_dir = None
+            self.collection = None
             
         except Exception as e:
             logging.error(f"Error during cleanup: {e}")
     
+    def _force_close_sqlite_connections(self):
+        """Force close any open SQLite connections"""
+        try:
+            import gc
+            gc.collect() 
+            if hasattr(self, 'temp_dir') and self.temp_dir:
+                sqlite_path = os.path.join(self.temp_dir, 'chroma.sqlite3')
+                if os.path.exists(sqlite_path):
+                    try:
+                        conn = sqlite3.connect(sqlite_path)
+                        conn.close()
+                    except Exception as e:
+                        logging.debug(f"SQLite cleanup attempt: {e}")
+        except Exception as e:
+            logging.warning(f"Error forcing SQLite cleanup: {e}")
+    
+    def _cleanup_temp_dir_with_retry(self, max_retries=3, delay=1):
+        """Clean up temporary directory with retry mechanism"""
+        for attempt in range(max_retries):
+            try:
+                time.sleep(delay * (attempt + 1))
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                if not os.path.exists(self.temp_dir):
+                    logging.info(f"Successfully cleaned up temporary directory: {self.temp_dir}")
+                    self.temp_dir = None
+                    return True
+                    
+            except Exception as e:
+                logging.warning(f"Cleanup attempt {attempt + 1} failed: {e}")
+                
+                if attempt == max_retries - 1:
+                    try:
+                        if os.name == 'nt': 
+                            import win32api
+                            import win32con
+                            win32api.MoveFileEx(self.temp_dir, None, win32con.MOVEFILE_DELAY_UNTIL_REBOOT)
+                            logging.info(f"Marked directory for deletion on reboot: {self.temp_dir}")
+                    except ImportError:
+                        logging.warning("Could not mark for deletion on reboot (win32api not available)")
+                    except Exception as e:
+                        logging.warning(f"Could not mark for deletion on reboot: {e}")
+        
+        return False
+    
+    def cleanup(self):
+        """Main cleanup method (alias for cleanup_safely)"""
+        self.cleanup_safely()
+    
     def __del__(self):
         """Destructor to ensure cleanup"""
         try:
-            self.cleanup()
+            self.cleanup_safely()
         except Exception as e:
             logging.error(f"Error in destructor: {e}")

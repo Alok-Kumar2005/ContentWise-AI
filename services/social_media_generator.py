@@ -68,7 +68,6 @@ class SocialMediaGenerator:
                 video_url=video_url
             )
             
-            # Extract hashtags
             hashtags = self._extract_hashtags(content)
             
             return SocialMediaPost(
