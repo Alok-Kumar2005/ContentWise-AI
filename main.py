@@ -11,7 +11,8 @@ from services.videodb_service import VideoDBService
 from services.llm_service import LLMService
 from services.social_media_generator import SocialMediaGenerator
 from services.rag_service import RAGService
-from models.video_processor import VideoAnalysis, TimestampQuery
+from services.quiz_generator  import QuizGeneratorService
+from models.video_processor import VideoAnalysis, TimestampQuery, Quiz, QuizQuestion
 from utils.helpers import save_uploaded_file, validate_video_url, format_timestamp
 
 # Configure logging
@@ -25,6 +26,7 @@ def init_services():
         services['videodb'] = VideoDBService()
         services['llm'] = LLMService()
         services['social_media'] = SocialMediaGenerator()
+        services['quiz_generator'] = QuizGeneratorService()
         logging.info("Core services initialized successfully")
     except Exception as e:
         logging.error(f"Error initializing services: {e}")
@@ -82,15 +84,131 @@ def safe_rag_operation(operation_func, *args, **kwargs):
         logging.error(error_msg)
         return None, error_msg
 
+def render_quiz_interface(quiz, services):
+    """Render the quiz taking interface"""
+    st.subheader(f"📝 {quiz.title}")
+    st.markdown(f"**Total Questions:** {quiz.total_questions}")
+    st.markdown("---")
+    
+    # Initialize session state for quiz answers
+    if 'quiz_answers' not in st.session_state:
+        st.session_state.quiz_answers = {}
+    
+    # Display questions
+    for i, question in enumerate(quiz.questions):
+        st.markdown(f"**Question {i+1}:** {question.question}")
+        
+        # Radio button for options
+        option_key = f"question_{i}"
+        selected_option = st.radio(
+            f"Choose your answer for Question {i+1}:",
+            options=list(range(len(question.options))),
+            format_func=lambda x: f"{chr(65+x)}) {question.options[x]}",
+            key=option_key,
+            index=None
+        )
+        
+        # Store answer in session state
+        if selected_option is not None:
+            st.session_state.quiz_answers[str(i)] = selected_option
+        
+        st.markdown("---")
+    
+    # Submit quiz button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col2:
+        if st.button("📊 Submit Quiz", type="primary"):
+            if len(st.session_state.quiz_answers) == len(quiz.questions):
+                # Calculate score
+                score_result = services['quiz_generator'].calculate_score(
+                    st.session_state.quiz_answers, 
+                    quiz
+                )
+                
+                # Store results
+                st.session_state.quiz_results = score_result
+                st.session_state.quiz_submitted = True
+                st.rerun()
+            else:
+                st.error("Please answer all questions before submitting!")
+
+def render_quiz_results(quiz_results):
+    """Render quiz results"""
+    st.subheader("🎯 Quiz Results")
+    
+    # Score summary
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Score", f"{quiz_results['score']}/{quiz_results['total']}")
+    
+    with col2:
+        st.metric("Percentage", f"{quiz_results['percentage']}%")
+    
+    with col3:
+        status = "✅ PASSED" if quiz_results['passed'] else "❌ FAILED"
+        st.metric("Status", status)
+    
+    with col4:
+        if quiz_results['percentage'] >= 80:
+            grade = "A"
+        elif quiz_results['percentage'] >= 60:
+            grade = "B"
+        elif quiz_results['percentage'] >= 40:
+            grade = "C"
+        else:
+            grade = "F"
+        st.metric("Grade", grade)
+    
+    # Progress bar
+    st.progress(quiz_results['percentage'] / 100)
+    
+    # Detailed results
+    st.markdown("---")
+    st.subheader("📋 Detailed Results")
+    
+    for result in quiz_results['results']:
+        question_num = result['question_index'] + 1
+        is_correct = result['is_correct']
+        
+        # Question header with result
+        status_emoji = "✅" if is_correct else "❌"
+        st.markdown(f"**{status_emoji} Question {question_num}:** {result['question']}")
+        
+        # Show options with highlighting
+        for i, option in enumerate(result['options']):
+            option_letter = chr(65 + i)
+            
+            if i == result['correct_answer']:
+                # Correct answer
+                st.markdown(f"🟢 **{option_letter}) {option}** ← Correct Answer")
+            elif i == result['user_answer']:
+                # User's wrong answer
+                st.markdown(f"🔴 **{option_letter}) {option}** ← Your Answer")
+            else:
+                # Other options
+                st.markdown(f"⚪ {option_letter}) {option}")
+        
+        st.markdown("---")
+    
+    # Reset quiz button
+    if st.button("🔄 Take Quiz Again"):
+        # Clear quiz session state
+        for key in ['quiz_answers', 'quiz_results', 'quiz_submitted']:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+
 def main():
     st.set_page_config(
-        page_title="AI-Powered Video Analysis with RAG",
+        page_title="AI-Powered Video Analysis with RAG & Quiz",
         page_icon="🎥",
         layout="wide"
     )
     
-    st.title("🎥 AI-Powered Video Analysis with RAG")
-    st.markdown("Upload your video or provide a URL to get AI-powered analysis, summaries, social media posts, and intelligent Q&A!")
+    st.title("🎥 AI-Powered Video Analysis with RAG & Quiz")
+    st.markdown("Upload your video or provide a URL to get AI-powered analysis, summaries, social media posts, intelligent Q&A, and take quizzes!")
     
     # Initialize services
     try:
@@ -159,12 +277,13 @@ def main():
                         st.error("❌ Failed to initialize RAG service")
     
     # Main content tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📤 Upload & Analyze", 
         "📝 Summary & Topics", 
         "📱 Social Media Posts", 
         "🔍 Timestamp Search",
-        "🤖 AI Q&A (RAG)"
+        "🤖 AI Q&A (RAG)",
+        "🧠 Quiz Generator"
     ])
     
     with tab1:
@@ -535,6 +654,99 @@ def main():
                         st.rerun()
                     else:
                         st.error("❌ Failed to initialize RAG service. Check logs for details.")
+    
+    with tab6:
+        st.header("6. 🧠 Quiz Generator")
+        st.markdown("Generate and take a quiz based on the video content to test your understanding!")
+        
+        if 'transcript' in st.session_state:
+            # Check if quiz already exists and hasn't been submitted
+            if 'current_quiz' not in st.session_state or st.button("🔄 Generate New Quiz"):
+                # Clear any existing quiz state
+                for key in ['current_quiz', 'quiz_answers', 'quiz_results', 'quiz_submitted']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                
+                with st.spinner("🧠 Generating quiz from video content..."):
+                    try:
+                        # Generate quiz from transcript
+                        quiz = services['quiz_generator'].generate_quiz(
+                            st.session_state.transcript,
+                            st.session_state.get('video_title', 'Video Content'),
+                            num_questions=5
+                        )
+                        
+                        st.session_state.current_quiz = quiz
+                        st.session_state.quiz_submitted = False
+                        st.success(f"✅ Quiz generated with {quiz.total_questions} questions!")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Error generating quiz: {e}")
+                        logging.error(f"Quiz generation error: {e}")
+            
+            # Display quiz or results
+            if 'current_quiz' in st.session_state:
+                quiz = st.session_state.current_quiz
+                
+                # Show quiz results if submitted
+                if st.session_state.get('quiz_submitted', False) and 'quiz_results' in st.session_state:
+                    render_quiz_results(st.session_state.quiz_results)
+                else:
+                    # Show quiz interface
+                    render_quiz_interface(quiz, services)
+                
+                # Quiz Statistics (if results exist)
+                if 'quiz_results' in st.session_state:
+                    st.markdown("---")
+                    st.subheader("📈 Performance Analytics")
+                    
+                    results = st.session_state.quiz_results
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**Question-wise Performance:**")
+                        for i, result in enumerate(results['results']):
+                            status = "✅" if result['is_correct'] else "❌"
+                            st.write(f"Question {i+1}: {status}")
+                    
+                    with col2:
+                        st.markdown("**Difficulty Analysis:**")
+                        if results['percentage'] >= 80:
+                            st.success("🌟 Excellent understanding!")
+                        elif results['percentage'] >= 60:
+                            st.info("👍 Good grasp of the content!")
+                        elif results['percentage'] >= 40:
+                            st.warning("📚 Consider reviewing the material")
+                        else:
+                            st.error("📖 Recommend watching the video again")
+            
+            else:
+                st.info("Click 'Generate New Quiz' to create a quiz from the video content.")
+        
+        else:
+            st.info("Please upload and analyze a video first to generate a quiz.")
+            st.markdown("**Steps to generate a quiz:**")
+            st.markdown("1. Go to 'Upload & Analyze' tab and upload a video")
+            st.markdown("2. Go to 'Summary & Topics' tab and generate summary")
+            st.markdown("3. Return here to generate and take a quiz!")
+            
+            # Show sample quiz preview
+            with st.expander("📋 See Quiz Preview"):
+                st.markdown("**Sample Question Format:**")
+                st.markdown("**Question 1:** What is the main topic discussed in the video?")
+                st.markdown("A) Option 1")
+                st.markdown("B) Option 2") 
+                st.markdown("C) Option 3")
+                st.markdown("D) Option 4")
+                st.markdown("")
+                st.markdown("**Features:**")
+                st.markdown("- 5 multiple-choice questions")
+                st.markdown("- 4 options per question")
+                st.markdown("- Instant scoring and feedback")
+                st.markdown("- Detailed answer explanations")
+                st.markdown("- Performance analytics")
 
 if __name__ == "__main__":
     main()

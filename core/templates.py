@@ -106,3 +106,43 @@ Instructions:
 6. If the question cannot be answered from the context, say so explicitly
 
 Answer:"""
+
+    quiz_template = """
+    You are an expert quiz generator. Based on the following video transcript, create exactly {num_questions} multiple-choice questions that test understanding of the key concepts and information presented.
+
+    Video Title: {title}
+    Transcript: {transcript}
+
+    Generate questions that:
+    1. Cover the most important topics discussed
+    2. Test comprehension and understanding
+    3. Are clear and unambiguous
+    4. Have exactly 4 options each
+    5. Have only one correct answer
+    6. Vary in difficulty from basic recall to analytical thinking
+
+    Format your response EXACTLY like this example:
+
+    QUESTION 1: What is the main topic discussed in the video?
+    A) Option 1
+    B) Option 2
+    C) Option 3
+    D) Option 4
+    CORRECT: A
+
+    QUESTION 2: Which concept was explained first?
+    A) Option 1
+    B) Option 2
+    C) Option 3
+    D) Option 4
+    CORRECT: B
+
+    Continue this format for all {num_questions} questions. Make sure each question is numbered sequentially and follows the exact format above.
+    
+    Important guidelines:
+    - Questions should be based directly on content from the transcript
+    - Avoid trick questions or overly complex wording
+    - Make incorrect options plausible but clearly wrong
+    - Ensure questions test different aspects of the content
+    - Include a mix of factual recall and conceptual understanding questions
+    """
